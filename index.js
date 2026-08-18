@@ -9,6 +9,7 @@ const { recordMessage, conversationKey, setMessageEmitter } = require("./lib/mes
 const app=express()
 const server=http.createServer(app)
 const io=new Server(server)
+const path = require("path")
 
 app.use(express.json({limit:"1mb"}))
 app.use(express.static("public"))
@@ -83,6 +84,10 @@ app.get("/api/health",(req,res)=>{
         uptime:process.uptime(),
         sessions:getSessions()
     })
+})
+
+app.get("/admin", (req, res) => {
+    res.sendFile(path.join(__dirname, "public", "admin.html"))
 })
 
 app.get("/api/sessions",(req,res)=>{

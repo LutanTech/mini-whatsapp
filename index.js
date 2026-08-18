@@ -25,7 +25,13 @@ async function migrateDatabaseSchema(){
         "ALTER TABLE messages ADD COLUMN media_path TEXT",
         "ALTER TABLE messages ADD COLUMN mime_type TEXT",
         "ALTER TABLE messages ADD COLUMN file_name TEXT",
-        "ALTER TABLE messages ADD COLUMN group_name TEXT"
+        "ALTER TABLE messages ADD COLUMN group_name TEXT",
+        "ALTER TABLE messages ADD COLUMN sender_name TEXT",
+        "ALTER TABLE messages ADD COLUMN quoted_msg_id TEXT",
+        "ALTER TABLE messages ADD COLUMN quoted_text TEXT",
+        "ALTER TABLE messages ADD COLUMN quoted_sender TEXT",
+        "ALTER TABLE messages ADD COLUMN reaction TEXT",
+        "ALTER TABLE messages ADD COLUMN reaction_msg_id TEXT"
     ]){
         try{await run(sql)}catch{}
     }
@@ -116,12 +122,14 @@ app.get("/api/conversations",async(req,res)=>{
                 m.conversation_key,
                 m.session_id,
                 m.jid,
-                m.sender,
+                m.sender_name,
                 m.receiver,
                 m.push_name,
                 m.group_name,
                 m.created_at AS last_time,
-                m.text AS last_message
+               m.text,
+            m.reaction,
+            COALESCE(NULLIF(m.text, ''), 'reacted ' || m.reaction, '') AS last_message
             FROM messages m
             INNER JOIN(
                 SELECT conversation_key,MAX(id) AS last_id
@@ -211,6 +219,8 @@ io.on("connection",async socket=>{
 
         socket.emit("messages",rows)
     }catch{}
+
+    
 })
 
 setInterval(()=>{

@@ -124,6 +124,7 @@
             font-family: 'Inter', sans-serif;
             background-color: #05080e;
             color: #f1f5f9;
+            height:100%;
         }
 
         .glass-card {
@@ -496,631 +497,736 @@
     </div>
 </div>
 
-<script>
-let socket = null;
-let conversations = [];
-let activeThread = null;
-let currentFilter = 'all';
-
-function el(id) {
-    return document.getElementById(id);
-}
-
-function escapeHtml(value) {
-    return String(value ?? "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-}
-
-function escapeAttr(value) {
-    return escapeHtml(value).replace(/\\/g, "\\\\");
-}
-
-function getConversationTitle(c){
-    if(!c)return "Unknown"
-
-    if(c.jid==="status@broadcast")
-        return "WhatsApp Statuses"
-
-    if(c.jid?.endsWith("@g.us"))
-        return c.group_name || c.push_name + '[Group]' ||c.jid 
-
-    return c.push_name||c.sender||c.jid||"Unknown"
-}
-
-function formatChatTime(timestampSec) {
-    if (!timestampSec) return "";
-    const date = new Date(Number(timestampSec) * 1000);
-    const now = new Date();
-    const diffDays = Math.floor((now - date) / (1000 * 60 * 60 * 24));
-
-    if (diffDays === 0) {
-        return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    } else if (diffDays === 1) {
-        return "Yesterday";
-    } else if (diffDays < 7) {
-        const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-        return days[date.getDay()];
-    } else {
-        return date.toLocaleDateString([], { month: "short", day: "numeric" });
-    }
-}
-
-function setFilter(type) {
-    currentFilter = type;
-    
-    document.querySelectorAll('.nav-tab').forEach(tab => {
-        tab.className = "nav-tab flex flex-col items-center justify-center flex-1 h-full text-anon-muted border-t-2 border-transparent hover:text-anon-text transition-all";
-    });
-    
-    const activeTab = el('nav-' + type);
-    if (activeTab) {
-        activeTab.className = "nav-tab flex flex-col items-center justify-center flex-1 h-full text-anon-accent border-t-2 border-anon-accent transition-all";
-    }
-
-    const titleMap = {
-        all: "ACTIVE USERS",
-        group: "GROUP CHATS",
-        status: "STATUS UPDATES",
-        private: "CALL LOGS & PRIVATE"
-    };
-    el("sectionHeaderTitle").innerText = titleMap[type] || "ACTIVE USERS";
-
-    renderConversationsList();
-}
-
-function clearSearch() {
-    el("convSearch").value = "";
-    el("searchClearBtn").classList.add("hidden");
-    renderConversationsList();
-}
-
-function checkAuth() {
-    const auth = sessionStorage.getItem("adminAuth") === "true";
-    if (!auth) {
-        el("loginGate").classList.remove("hidden");
-        el("adminDashboard").classList.add("hidden");
-        return;
-    }
-    el("loginGate").classList.add("hidden");
-    el("unauthorizedScreen").classList.add("hidden");
-    el("adminDashboard").classList.remove("hidden");
-    initAdminConsole();
-}
-
-async function handleLogin(e) {
-    e.preventDefault();
-    const email = el("adminEmail").value.trim();
-    const password = el("adminPassword").value.trim();
-
-    try {
-        const res = await fetch("/api/admin/login", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ email, password })
-        });
-        const data = await res.json();
-        
-        if (res.ok && data.success) {
-            sessionStorage.setItem("adminAuth", "true");
-            checkAuth();
-            return;
-        }
-        
-        el("loginGate").classList.add("hidden");
-        el("unauthorizedScreen").classList.remove("hidden");
-        el("unauthorizedMsg").innerText = data.error || "Invalid administrator credentials provided.";
-    } catch {
-        el("loginGate").classList.add("hidden");
-        el("unauthorizedScreen").classList.remove("hidden");
-        el("unauthorizedMsg").innerText = "Unable to connect to authentication server.";
-    }
-}
-
-function retryLogin() {
-    el("unauthorizedScreen").classList.add("hidden");
-    el("loginGate").classList.remove("hidden");
-    el("adminPassword").value = "";
-}
-
-function logoutAdmin() {
-    sessionStorage.removeItem("adminAuth");
-    location.reload();
-}
-
-function initAdminConsole() {
-    if (typeof io !== "undefined") {
-        try {
-            socket = io();
-
-            socket.on("connect", () => {
-                el("socket-dot").className = "absolute bottom-0 right-0 w-3 h-3 rounded-full bg-emerald-500 border-2 border-anon-sidebar shadow-[0_0_8px_rgba(16,185,129,0.8)]";
-                el("socket-text").innerText = "Connected";
-                fetchHealth();
-                fetchConversations();
-            });
-
-            socket.on("disconnect", () => {
-                el("socket-dot").className = "absolute bottom-0 right-0 w-3 h-3 rounded-full bg-amber-500 border-2 border-anon-sidebar animate-pulse";
-                el("socket-text").innerText = "Disconnected";
-            });
-
-            socket.on("sessions", sessions => {
-                renderAdminSessions(sessions);
-            });
-
-            socket.on("message", message => {
-                fetchConversations();
-                if (activeThread && message.conversation_key === activeThread.conversation_key) {
-                    openConversation(activeThread.conversation_key);
-                }
-            });
-        } catch(e) {
-            el("socket-text").innerText = "Offline Mode";
-        }
-    }
-
-    fetchConversations();
-    fetchHealth();
-}
-
-async function fetchConversations() {
-    try {
-        const res = await fetch("/api/conversations");
-        if (!res.ok) throw new Error("Failed to fetch conversations");
-        const data = await res.json();
-        console.log(data)
-        conversations = Array.isArray(data.conversations) ? data.conversations : [];
-    } catch (err) {
-        conversations = [];
-    }
-    renderConversationsList();
-}
-
-function renderConversationsList() {
-    const container = el("conversationsList");
-    const searchRaw = el("convSearch").value.toLowerCase();
-    
-    if (searchRaw) {
-        el("searchClearBtn").classList.remove("hidden");
-    } else {
-        el("searchClearBtn").classList.add("hidden");
-    }
-
-    const filtered = conversations.filter(c => {
-        const title = getConversationTitle(c);
-        const searchTarget = [title, c.conversation_key, c.last_message, c.session_phone].filter(Boolean).join(" ").toLowerCase();
-        
-        const matchesSearch = searchTarget.includes(searchRaw);
-
-        const jid = c.jid || c.conversation_key || "";
-        let matchesFilter = true;
-        if (currentFilter === "group") matchesFilter = jid.endsWith("@g.us");
-        else if (currentFilter === "status") matchesFilter = jid.includes("status@broadcast");
-        else if (currentFilter === "private") matchesFilter = !jid.endsWith("@g.us") && !jid.includes("status@broadcast");
-
-        return matchesSearch && matchesFilter;
-    });
-
-    el("onlineCountBadge").innerText = `${filtered.length} Active`;
-
-    if (!filtered.length) {
-        container.innerHTML = `
-            <div class="text-center py-12 text-anon-muted space-y-2">
-                <i class="fa-solid fa-comments-question text-3xl opacity-30"></i>
-                <p class="text-xs">No active conversations found</p>
-            </div>
-        `;
-        return;
-    }
-
-    filtered.sort((a, b) => Number(b.last_time || 0) - Number(a.last_time || 0));
-
-    container.innerHTML = filtered.map(c => {
-        const key = c.conversation_key;
-        const active = activeThread && activeThread.conversation_key === key;
-        const timeStr = formatChatTime(c.last_time);
-        const title = getConversationTitle(c);
-        const msg = c.last_message || "Attachment / Media file";
-
-        return `
-            <div onclick="openConversation('${escapeAttr(key)}')"
-                 class="flex items-center gap-3.5 p-3 rounded-2xl cursor-pointer transition-all my-1 relative group
-                 ${active ? 'bg-anon-panel border border-anon-accent/30 shadow-md' : 'hover:bg-anon-panel/60 border border-transparent'}">
-                
-                <div class="relative shrink-0">
-                    <div class="w-12 h-12 rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 border border-anon-border flex items-center justify-center text-anon-accent shadow-inner overflow-hidden">
-                        <i class="fa-solid fa-circle-user text-2xl"></i>
-                    </div>
-                    <span class="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-emerald-500 border-2 border-anon-sidebar"></span>
+<div
+    id="statusDayModal"
+    class="hidden fixed inset-0 z-[9999] bg-black/70 backdrop-blur-sm items-center justify-center p-4"
+>
+    <div
+        class="w-full max-w-lg max-h-[85vh] bg-anon-panel border border-anon-border rounded-2xl shadow-2xl overflow-hidden"
+    >
+        <div class="flex items-center justify-between px-4 py-3 border-b border-anon-border">
+            <div>
+                <div class="text-sm font-bold text-slate-100">
+                    Statuses
                 </div>
 
-                <div class="flex-1 min-w-0">
-                    <div class="flex justify-between items-baseline gap-2 mb-1">
-                        <h3 class="text-xs font-bold text-anon-text truncate group-hover:text-anon-accent transition-colors">
-                            ${escapeHtml(title)}
-                        </h3>
-                        <span class="text-[10px] text-anon-muted shrink-0 font-medium">${timeStr}</span>
-                    </div>
-                    
-                    <div class="flex items-center gap-1.5 text-[11px] text-anon-muted truncate">
-                        ${c.is_double_check !== false ? `<i class="fa-solid fa-check-double text-anon-accent text-[10px]"></i>` : ''}
-                        <span class="truncate">${c.push_name + ' :' + escapeHtml(msg)}</span>
-                    </div>
-                </div>
+                <div
+                    id="statusDayModalDate"
+                    class="text-[10px] text-anon-muted"
+                ></div>
             </div>
-        `;
-    }).join("");
-}
 
-async function openConversation(key) {
-    if (!key) return;
-
-    let conversation = conversations.find(c => c.conversation_key === key);
-    if (!conversation) {
-        conversation = { conversation_key: key, sender_name: key, jid: key };
-    }
-
-    activeThread = { conversation_key: key };
-
-    if (window.innerWidth < 768) {
-        el("sidebar").classList.add("hidden");
-        el("mainChatArea").classList.remove("hidden");
-        el("mainChatArea").classList.add("flex");
-    }
-
-    renderConversationsList();
-
-    el("emptyChatState").classList.add("hidden");
-    el("activeChatView").classList.remove("hidden");
-    el("activeChatView").classList.add("flex");
-
-    const title = getConversationTitle(conversation);
-    el("chatTitle").innerText = title;
-    el("chatSubtitle").innerText = conversation.jid || "Online";
-
-    const sessionLabel = conversation.session_phone || "Primary Bot";
-    el("chatSessionBadge").innerText = `Session: ${sessionLabel}`;
-
-    const container = el("chatMessagesContainer");
-    container.innerHTML = `
-        <div class="h-full flex flex-col items-center justify-center text-anon-muted space-y-2">
-            <i class="fa-solid fa-circle-notch fa-spin text-2xl text-anon-accent"></i>
-            <span class="text-xs">Loading message logs...</span>
+            <button
+                onclick="closeStatusDayModal()"
+                class="w-8 h-8 rounded-full hover:bg-white/10 text-slate-400 hover:text-white transition"
+            >
+                <i class="fa-solid fa-xmark"></i>
+            </button>
         </div>
-    `;
 
-    try {
-        const res = await fetch(`/api/conversations/${encodeURIComponent(key)}`);
-        if (!res.ok) throw new Error("Failed to fetch message history");
-        const data = await res.json();
-        renderChatThread(data.messages || []);
-    } catch (err) {
-        container.innerHTML = `
-            <div class="h-full flex items-center justify-center">
-                <div class="bg-anon-panel px-4 py-3 rounded-2xl text-xs text-rose-400 border border-rose-500/20 shadow-lg">
-                    Unable to load conversation thread history.
-                </div>
-            </div>
-        `;
-    }
-}
+        <div
+            id="statusDayModalContent"
+            class="p-4 overflow-y-auto max-h-[70vh] space-y-2"
+        ></div>
+    </div>
+</div>
 
-function closeMobileChat() {
-    activeThread = null;
-    el('sidebar').classList.remove('hidden');
-    el('mainChatArea').classList.add('hidden');
-    el('mainChatArea').classList.remove('flex');
-    renderConversationsList();
-}
+<div
+    id="reactionModal"
+    class="fixed inset-0 z-[60] hidden items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+>
+    <div
+        class="w-full max-w-md max-h-[80vh] bg-anon-sidebar border border-anon-border rounded-2xl shadow-2xl overflow-hidden"
+        onclick="event.stopPropagation()"
+    >
+        <div class="flex items-center justify-between p-4 border-b border-anon-border">
+            <h3
+                id="reactionModalTitle"
+                class="text-sm font-bold text-slate-100"
+            >
+                Reactions
+            </h3>
 
-function renderChatThread(messages) {
-    const container = el("chatMessagesContainer");
+            <button
+                onclick="closeReactionModal()"
+                class="w-8 h-8 rounded-full hover:bg-anon-panel text-anon-muted hover:text-white"
+            >
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
 
-    if (!messages || !messages.length) {
-        container.innerHTML = `
-            <div class="mt-12 mx-auto bg-anon-panel/80 backdrop-blur-md px-6 py-3 rounded-full text-center text-anon-muted text-xs border border-anon-border shadow-sm">
-                No messages recorded for this conversation.
-            </div>
-        `;
-        return;
-    }
-
-    const sortedMessages = [...messages].sort((a, b) => Number(a.created_at) - Number(b.created_at));
-
-
-    container.innerHTML = sortedMessages.map((m, index) => {
-        const self = Number(m.from_me) === 1;
-        const sender = m.push_name || m.sender || "Contact";
-        const time = m.created_at
-            ? new Date(Number(m.created_at) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
-            : "";
+        <div
+            id="reactionModalContent"
+            class="p-3 space-y-2 overflow-y-auto max-h-[65vh]"
+        ></div>
+    </div>
+</div>
+<script>
+    let socket=null,conversations=[],activeThread=null,currentFilter="all"
+    const reactions=new Map()
+    function el(id){return document.getElementById(id)}
+    function escapeHtml(v){return String(v??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;")}
+    function escapeAttr(v){return escapeHtml(v).replace(/\\/g,"\\\\")}
     
-        let mediaContent = "";
-        if (m.media_path) {
-            if (m.media_type === "image" || (m.mime_type && m.mime_type.startsWith("image/"))) {
-                mediaContent = `
-                    <div class="mb-1.5 overflow-hidden rounded-lg">
-                        <img src="${escapeHtml(m.media_path)}" 
-                             alt="Image" 
-                             class="w-full max-h-60 object-cover rounded-lg cursor-pointer hover:opacity-95 transition-opacity" 
-                             loading="lazy" 
-                             onclick="openMediaModal('${escapeHtml(m.media_path)}', 'image')" />
+    function getConversationTitle(c){
+        if(!c)return"Unknown"
+        if(c.jid==="status@broadcast")return"WhatsApp Statuses"
+        if(c.jid?.endsWith("@g.us"))return c.group_name||c.push_name+" [Group]"||c.jid
+        return c.push_name||c.sender||c.jid||"Unknown"
+    }
+    
+    function formatChatTime(t){
+        if(!t)return""
+        const d=new Date(Number(t)*1000),n=new Date(),days=Math.floor((n-d)/86400000)
+        if(days===0)return d.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})
+        if(days===1)return"Yesterday"
+        if(days<7)return["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][d.getDay()]
+        return d.toLocaleDateString([],{month:"short",day:"numeric"})
+    }
+    
+    function setFilter(type){
+        currentFilter=type
+        document.querySelectorAll(".nav-tab").forEach(t=>t.className="nav-tab flex flex-col items-center justify-center flex-1 h-full text-anon-muted border-t-2 border-transparent hover:text-anon-text transition-all")
+        const tab=el("nav-"+type)
+        if(tab)tab.className="nav-tab flex flex-col items-center justify-center flex-1 h-full text-anon-accent border-t-2 border-anon-accent transition-all"
+        el("sectionHeaderTitle").innerText={all:"ACTIVE USERS",group:"GROUP CHATS",status:"STATUS UPDATES",private:"CALL LOGS & PRIVATE"}[type]||"ACTIVE USERS"
+        renderConversationsList()
+    }
+    
+    function clearSearch(){
+        el("convSearch").value=""
+        el("searchClearBtn").classList.add("hidden")
+        renderConversationsList()
+    }
+    
+    function checkAuth(){
+        if(sessionStorage.getItem("adminAuth")!=="true"){
+            el("loginGate").classList.remove("hidden")
+            el("adminDashboard").classList.add("hidden")
+            return
+        }
+        el("loginGate").classList.add("hidden")
+        el("unauthorizedScreen").classList.add("hidden")
+        el("adminDashboard").classList.remove("hidden")
+        initAdminConsole()
+    }
+    
+    async function handleLogin(e){
+        e.preventDefault()
+        const email=el("adminEmail").value.trim(),password=el("adminPassword").value.trim()
+        try{
+            const r=await fetch("/api/admin/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email,password})})
+            const d=await r.json()
+            if(r.ok&&d.success){
+                sessionStorage.setItem("adminAuth","true")
+                checkAuth()
+                return
+            }
+            el("loginGate").classList.add("hidden")
+            el("unauthorizedScreen").classList.remove("hidden")
+            el("unauthorizedMsg").innerText=d.error||"Invalid administrator credentials provided."
+        }catch{
+            el("loginGate").classList.add("hidden")
+            el("unauthorizedScreen").classList.remove("hidden")
+            el("unauthorizedMsg").innerText="Unable to connect to authentication server."
+        }
+    }
+    
+    function retryLogin(){
+        el("unauthorizedScreen").classList.add("hidden")
+        el("loginGate").classList.remove("hidden")
+        el("adminPassword").value=""
+    }
+    
+    function logoutAdmin(){
+        sessionStorage.removeItem("adminAuth")
+        location.reload()
+    }
+    
+    function initAdminConsole(){
+        if(typeof io!=="undefined")try{
+            socket=io()
+            socket.on("connect",()=>{
+                el("socket-dot").className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-emerald-500 border-2 border-anon-sidebar shadow-[0_0_8px_rgba(16,185,129,0.8)]"
+                el("socket-text").innerText="Connected"
+                fetchHealth()
+                fetchConversations()
+            })
+            socket.on("disconnect",()=>{
+                el("socket-dot").className="absolute bottom-0 right-0 w-3 h-3 rounded-full bg-amber-500 border-2 border-anon-sidebar animate-pulse"
+                el("socket-text").innerText="Disconnected"
+            })
+            socket.on("sessions",renderAdminSessions)
+            socket.on("message",m=>{
+                fetchConversations()
+                if(activeThread&&m.conversation_key===activeThread.conversation_key)openConversation(activeThread.conversation_key)
+            })
+        }catch{el("socket-text").innerText="Offline Mode"}
+        fetchConversations()
+        fetchHealth()
+    }
+
+    function openReactionModal(reactions, emoji){
+        const modal=document.getElementById("reactionModal")
+        const content=document.getElementById("reactionModalContent")
+        const title=document.getElementById("reactionModalTitle")
+    
+        if(!modal||!content)return
+    
+        title.textContent=`${emoji} Reactions`
+    
+        content.innerHTML=reactions.map(r=>{
+            const name=
+                r.sender_name||
+                r.push_name||
+                r.sender||
+                "Unknown"
+    
+            const time=r.created_at
+                ?new Date(Number(r.created_at)*1000)
+                    .toLocaleTimeString([],{
+                        hour:"2-digit",
+                        minute:"2-digit"
+                    })
+                :""
+    
+            return `
+                <div class="flex items-center gap-3 p-3 rounded-xl bg-black/20 border border-anon-border">
+                    <div class="w-9 h-9 rounded-full bg-anon-accent/10 border border-anon-accent/20 flex items-center justify-center">
+                        <i class="fa-solid fa-user text-anon-accent text-xs"></i>
                     </div>
-                `;
-            } else if (m.media_type === "video" || (m.mime_type && m.mime_type.startsWith("video/"))) {
-                mediaContent = `
-                    <div class="mb-1.5 overflow-hidden rounded-lg relative group cursor-pointer" onclick="openMediaModal('${escapeHtml(m.media_path)}', 'video', '${escapeHtml(m.mime_type || "video/mp4")}')">
-                        <video class="w-full max-h-60 rounded-lg bg-black/40 pointer-events-none" preload="metadata">
-                            <source src="${escapeHtml(m.media_path)}" type="${escapeHtml(m.mime_type || "video/mp4")}">
-                        </video>
-                        <div class="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/20 transition-colors">
-                            <i class="fa-solid fa-play text-white text-2xl drop-shadow-md"></i>
+    
+                    <div class="min-w-0 flex-1">
+                        <div class="text-xs font-bold text-slate-100 truncate">
+                            ${escapeHtml(name)}
+                        </div>
+    
+                        <div class="text-[9px] text-anon-muted truncate">
+                            ${escapeHtml(r.sender||"")}
                         </div>
                     </div>
-                `;
-            } else if (m.media_type === "document" || (m.mime_type && m.mime_type.startsWith("application/"))) {
-                const fileName = m.file_name || "Document";
-                mediaContent = `
-                    <a href="${escapeHtml(m.media_path)}" target="_blank" download class="flex items-center gap-2 p-2 mb-1.5 bg-black/20 hover:bg-black/30 rounded-lg border border-slate-700/30 transition-colors group">
-                        <i class="fa-solid fa-file-lines text-anon-accent text-base group-hover:scale-110 transition-transform"></i>
-                        <span class="text-xs text-slate-200 truncate flex-1">${escapeHtml(fileName)}</span>
-                        <i class="fa-solid fa-download text-xs text-slate-400 group-hover:text-slate-200"></i>
-                    </a>
-                `;
-            }
+    
+                    <div class="text-right">
+                        <div class="text-lg">${escapeHtml(r.reaction)}</div>
+                        <div class="text-[9px] text-anon-muted">${time}</div>
+                    </div>
+                </div>
+            `
+        }).join("")
+    
+        modal.classList.remove("hidden")
+        modal.classList.add("flex")
+    }
+    
+    function closeReactionModal(){
+        const modal=document.getElementById("reactionModal")
+        if(!modal)return
+    
+        modal.classList.add("hidden")
+        modal.classList.remove("flex")
+    }
+    
+    async function fetchConversations(){
+        try{
+            const r=await fetch("/api/conversations")
+            if(!r.ok)throw Error()
+            const d=await r.json()
+            conversations=Array.isArray(d.conversations)?d.conversations:[]
+        }catch{conversations=[]}
+        renderConversationsList()
+    }
+    
+    function renderConversationsList(){
+        const c=el("conversationsList"),search=el("convSearch").value.toLowerCase()
+        el("searchClearBtn").classList.toggle("hidden",!search)
+    
+        const filtered=conversations.filter(x=>{
+            const title=getConversationTitle(x)
+            const target=[title,x.conversation_key,x.last_message,x.session_phone].filter(Boolean).join(" ").toLowerCase()
+            const jid=x.jid||x.conversation_key||""
+            let f=true
+            if(currentFilter==="group")f=jid.endsWith("@g.us")
+            else if(currentFilter==="status")f=jid.includes("status@broadcast")
+            else if(currentFilter==="private")f=!jid.endsWith("@g.us")&&!jid.includes("status@broadcast")
+            return target.includes(search)&&f
+        }).sort((a,b)=>Number(b.last_time||0)-Number(a.last_time||0))
+    
+        el("onlineCountBadge").innerText=`${filtered.length} Active`
+    
+        if(!filtered.length){
+            c.innerHTML=`<div class="text-center py-12 text-anon-muted space-y-2"><i class="fa-solid fa-comments-question text-3xl opacity-30"></i><p class="text-xs">No active conversations found</p></div>`
+            return
         }
     
-        return `
-            <div class="flex flex-col w-full ${self ? "items-end" : "items-start"}">
-                <div class="max-w-[85%] sm:max-w-[65%] px-4 py-2.5 text-xs leading-relaxed shadow-sm rounded-2xl
-                    ${self ? "bg-anon-msgOut text-slate-100 rounded-tr-none border border-emerald-600/30" : "bg-anon-msgIn text-slate-100 rounded-tl-none border border-slate-700/40"}">
-                    
-                    ${!self ? `
-                        <div class="text-[10px] font-bold text-anon-accent mb-1 truncate">
-                            ${escapeHtml(sender)}
-                        </div>
-                    ` : ""}
-    
-                    ${mediaContent}
-    
-                    ${m.text ? `
-                        <div class="break-words">
-                            ${escapeHtml(m.text)}
-                        </div>
-                    ` : ""}
-    
-                    <div class="flex justify-end items-center gap-1.5 mt-1 text-[10px] text-slate-400 font-mono">
-                        <span>${time}</span>
-                        ${self ? `<i class="fa-solid fa-check-double text-anon-accent text-[10px]"></i>` : ""}
-                    </div>
-                </div>
-            </div>
-        `;
-    }).join("");
+        c.innerHTML=filtered.map(x=>{
+            console.log(x)
 
-    setTimeout(() => {
-        container.scrollTop = container.scrollHeight;
-    }, 50);
-}
+            const key=x.conversation_key,active=activeThread?.conversation_key===key
+            const title=getConversationTitle(x),msg=x.last_message||"Attachment / Media file"
+            return `<div onclick="openConversation('${escapeAttr(key)}')" class="flex items-center gap-3.5 p-3 rounded-2xl cursor-pointer transition-all my-1 relative group ${active?"bg-anon-panel border border-anon-accent/30 shadow-md":"hover:bg-anon-panel/60 border border-transparent"}">
+                <div class="relative shrink-0"><div class="w-12 h-12 rounded-2xl bg-gradient-to-br from-slate-800 to-slate-900 border border-anon-border flex items-center justify-center text-anon-accent shadow-inner"><i class="fa-solid fa-circle-user text-2xl"></i></div><span class="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-emerald-500 border-2 border-anon-sidebar"></span></div>
+                <div class="flex-1 min-w-0"><div class="flex justify-between items-baseline gap-2 mb-1"><h3 class="text-xs font-bold text-anon-text truncate">${escapeHtml(title)}</h3><span class="text-[10px] text-anon-muted shrink-0">${formatChatTime(x.last_time)}</span></div>
+                <div class="flex items-center gap-1.5 text-[11px] text-anon-muted truncate"><i class="fa-solid fa-check-double text-anon-accent text-[10px]"></i><span class="truncate">${escapeHtml(x.push_name||"Contact")} : ${escapeHtml(msg)}</span></div></div>
+            </div>`
+        }).join("")
+    }
 
+    function renderNormalMessages(messages){
+        const reactions=new Map()
     
-function openMediaModal(src, type, mimeType = "video/mp4") {
-    let modal = document.getElementById("global-media-modal");
-    if (!modal) {
-        modal = document.createElement("div");
-        modal.id = "global-media-modal";
-        modal.className = "fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 hidden";
-        modal.onclick = (e) => {
-            if (e.target === modal || e.target.id === "modal-close-btn") {
-                closeMediaModal();
+        messages.forEach(m=>{
+            if(m.reaction_msg_id&&m.reaction){
+                if(!reactions.has(m.reaction_msg_id))
+                    reactions.set(m.reaction_msg_id,[])
+                reactions.get(m.reaction_msg_id).push(m)
             }
-        };
-
-        modal.innerHTML = `
-            <div class="relative max-w-4xl w-full max-h-[90vh] flex flex-col items-center justify-center">
-                <button id="modal-close-btn" class="absolute -top-10 right-0 text-white text-2xl hover:text-slate-300 p-2">
-                    <i class="fa-solid fa-xmark pointer-events-none"></i>
-                </button>
-                <div id="modal-media-container" class="w-full flex justify-center items-center overflow-hidden rounded-xl"></div>
-            </div>
-        `;
-        document.body.appendChild(modal);
-    }
-
-    const container = document.getElementById("modal-media-container");
-    if (type === "image") {
-        container.innerHTML = `<img src="${src}" class="max-w-full max-h-[80vh] object-contain rounded-xl shadow-2xl" />`;
-    } else if (type === "video") {
-        container.innerHTML = `
-            <video controls autoplay class="max-w-full max-h-[80vh] rounded-xl shadow-2xl">
-                <source src="${src}" type="${mimeType}">
-            </video>
-        `;
-    }
-
-    modal.classList.remove("hidden");
-}
-
-function closeMediaModal() {
-    const modal = document.getElementById("global-media-modal");
-    if (modal) {
-        modal.classList.add("hidden");
-        const container = document.getElementById("modal-media-container");
-        if (container) container.innerHTML = "";
-    }
-}
-
-async function fetchHealth() {
-    try {
-        const res = await fetch("/api/health");
-        if (!res.ok) throw new Error("Health check failed");
-        const data = await res.json();
-
-        el("stat-status").innerText = data.status === "ok" ? "Operational" : "Degraded";
-        el("stat-status").className = data.status === "ok" ? "text-sm font-semibold text-anon-accent mt-2" : "text-sm font-semibold text-amber-500 mt-2";
-        el("stat-uptime").innerText = formatUptime(data.uptime);
-
-        renderAdminSessions(data.sessions || []);
-    } catch {
-        el("stat-status").innerText = "Offline";
-        el("stat-status").className = "text-sm font-semibold text-rose-500 mt-2";
-        el("stat-uptime").innerText = "--";
-        renderAdminSessions([]);
-    }
-}
-
-function formatUptime(seconds) {
-    seconds = Number(seconds || 0);
-    const d = Math.floor(seconds / 86400);
-    const h = Math.floor((seconds % 86400) / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-
-    if (d) return `${d}d ${h}h`;
-    if (h) return `${h}h ${m}m`;
-    return `${m}m`;
-}
-
-function renderAdminSessions(sessions) {
-    const list = el("adminSessionsList");
-    sessions = Array.isArray(sessions) ? sessions : [];
-
-    el("stat-sessions").innerText = sessions.length;
-
-    if (!sessions.length) {
-        list.innerHTML = `
-            <div class="text-center py-6 border border-anon-border border-dashed rounded-2xl bg-anon-panel/40 text-anon-muted text-xs">
-                No active WhatsApp accounts linked.
-            </div>
-        `;
-        return;
-    }
-
-    list.innerHTML = sessions.map(s => {
-        const online = s.status === "connected";
-        return `
-            <div class="flex items-center justify-between p-3.5 bg-anon-panel border border-anon-border rounded-2xl">
-                <div class="flex items-center gap-3">
-                    <div class="w-9 h-9 bg-anon-sidebar rounded-full flex items-center justify-center border border-anon-border text-anon-accent">
-                        <i class="fa-brands fa-whatsapp text-lg"></i>
-                    </div>
-                    <div>
-                        <p class="font-bold text-xs text-anon-text">${escapeHtml(s.phone || s.id || "Main Session")}</p>
-                        <p class="text-[10px] text-anon-accent font-medium capitalize">${escapeHtml(s.status || "disconnected")}</p>
-                    </div>
-                </div>
-                <button onclick="promptLogout('${escapeAttr(s.id || "")}')" class="px-3 py-1.5 bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 rounded-xl text-xs font-semibold transition-colors">
-                    Logout
-                </button>
-            </div>
-        `;
-    }).join("");
-}
-
-function openModal(id) {
-    el(id).classList.remove("hidden");
-    el(id).classList.add("flex");
-    if(id === 'statsModal') fetchHealth();
-}
-
-function closeModal(id) {
-    el(id).classList.add("hidden");
-    el(id).classList.remove("flex");
-}
-
-function promptLogout(id) {
-    el("modalTitle").innerText = "Terminate Session";
-    el("modalMessage").innerText = `Are you sure you want to log out session ${id}? Active bot automation will pause until re-paired.`;
-    el("modalConfirmBtn").onclick = async () => {
-        closeModal('modalOverlay');
-        await executeLogout(id);
-    };
-    openModal('modalOverlay');
-}
-
-async function executeLogout(id) {
-    try {
-        const res = await fetch(`/api/logout/${encodeURIComponent(id)}`, { method: "POST" });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Logout failed");
-        showToast("Session terminated successfully", "success");
-        fetchHealth();
-    } catch (err) {
-        showToast(err.message, "error");
-    }
-}
-
-async function handleAdminPair(e) {
-    e.preventDefault();
-    const phone = el("phone").value.trim();
-    const btn = el("pairBtn");
-
-    el("pairResult").classList.add("hidden");
-    el("pairError").classList.add("hidden");
-
-    btn.disabled = true;
-    btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin"></i> Generating Code...`;
-
-    try {
-        const res = await fetch("/api/pair", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ phone })
-        });
-        const data = await res.json();
-
-        if (!res.ok) throw new Error(data.error || "Pairing failed.");
-
-        el("pairCode").innerText = data.code || "";
-        el("pairResult").classList.remove("hidden");
-        showToast("Pairing code generated", "success");
-    } catch (err) {
-        el("pairErrorMsg").innerText = err.message;
-        el("pairError").classList.remove("hidden");
-    } finally {
-        btn.disabled = false;
-        btn.innerHTML = `<i class="fa-solid fa-link"></i> Request Pairing Code`;
-    }
-}
-
-function copyPairCode() {
-    const code = el("pairCode").innerText;
-    if (!code) return;
+        })
     
-    const textarea = document.createElement("textarea");
-    textarea.value = code;
-    document.body.appendChild(textarea);
-    textarea.select();
-    try {
-        document.execCommand("copy");
-        showToast("Pairing code copied to clipboard", "success");
-    } catch (err) {
-        showToast("Failed to copy code", "error");
-    }
-    document.body.removeChild(textarea);
-}
-
-function showToast(message, type = "success") {
-    const toast = el("toast");
-    el("toastMsg").innerText = message;
+        return messages.filter(m=>!m.reaction_msg_id).map(m=>{
+            const self=Number(m.from_me)===1
+            const sender=m.push_name||m.sender_name||m.sender||"Contact"
+            const time=m.created_at
+                ?new Date(Number(m.created_at)*1000).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})
+                :""
+                console.log(m)
+            
     
-    el("toastIcon").className = type === "success" 
-        ? "fa-solid fa-circle-check text-anon-accent text-base" 
-        : "fa-solid fa-circle-xmark text-rose-500 text-base";
+            const quoted=m.quoted_text
+                ?`<div class="mb-2 px-2.5 py-1.5 rounded-lg bg-black/20 border-l-2 border-anon-accent"><div class="text-[9px] font-bold text-anon-accent truncate">${escapeHtml(m.quoted_sender||"Replied message")}</div><div class="text-[10px] text-slate-300 break-words line-clamp-2">${escapeHtml(m.quoted_text)}</div></div>`
+                :""
+    
+            let media=""
+    
+            if(m.media_path){
+                if(m.media_type==="image"||m.mime_type?.startsWith("image/"))
+                    media=`<div class="mb-1.5 overflow-hidden rounded-lg"><img src="${escapeHtml(m.media_path)}" class="w-full max-h-60 object-cover rounded-lg cursor-pointer" onclick="openMediaModal('${escapeHtml(m.media_path)}','image')"></div>`
+                else if(m.media_type==="video"||m.mime_type?.startsWith("video/"))
+                    media=`<div class="mb-1.5 overflow-hidden rounded-lg relative cursor-pointer" onclick="openMediaModal('${escapeHtml(m.media_path)}','video','${escapeHtml(m.mime_type||"video/mp4")}')"><video class="w-full max-h-60 rounded-lg bg-black/40 pointer-events-none"><source src="${escapeHtml(m.media_path)}" type="${escapeHtml(m.mime_type||"video/mp4")}"></video><div class="absolute inset-0 flex items-center justify-center bg-black/30"><i class="fa-solid fa-play text-white text-2xl"></i></div></div>`
+                else if(m.media_type==="document"||m.mime_type?.startsWith("application/"))
+                    media=`<a href="${escapeHtml(m.media_path)}" target="_blank" download class="flex items-center gap-2 p-2 mb-1.5 bg-black/20 rounded-lg border border-slate-700/30"><i class="fa-solid fa-file-lines text-anon-accent"></i><span class="text-xs text-slate-200 truncate flex-1">${escapeHtml(m.file_name||"Document")}</span><i class="fa-solid fa-download text-xs text-slate-400"></i></a>`
+            }
+    
+            const list=reactions.get(m.msg_id)||[]
+            const groups={}
+    
+            list.forEach(r=>{
+                if(!groups[r.reaction])groups[r.reaction]=[]
+                groups[r.reaction].push(r)
+            })
+    
+            const reactionHtml=Object.entries(groups).map(([emoji,list])=>{
+                const data=JSON.stringify(list)
+                    .replace(/\\/g,"\\\\")
+                    .replace(/'/g,"&#39;")
+            
+                return `<button onclick='openReactionModal(${data},${JSON.stringify(emoji)})' class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/30 border border-anon-border text-sm hover:bg-anon-panel">${escapeHtml(emoji)}${list.length>1?`<span class="text-[9px] text-anon-muted">${list.length}</span>`:""}</button>`
+            }).join("")
+    
+            return `
+                <div class="flex flex-col w-full ${self?"items-end":"items-start"}">
+                    <div class="max-w-[85%] sm:max-w-[65%]">
+                        <div class="px-4 py-2.5 text-xs leading-relaxed shadow-sm rounded-2xl ${self?"bg-anon-msgOut text-slate-100 rounded-tr-none border border-emerald-600/30":"bg-anon-msgIn text-slate-100 rounded-tl-none border border-slate-700/40"}">
+                            ${!self?`<div class="text-[10px] font-bold text-anon-accent mb-1 truncate">${escapeHtml(sender)}</div>`:""}
+                            ${quoted}${media}
+                            ${m.text?`<div class="break-words">${escapeHtml(m.text)}</div>`:""}
+                            <div class="flex justify-end items-center gap-1.5 mt-1 text-[10px] text-slate-400 font-mono"><span>${time}</span>${self?`<i class="fa-solid fa-check-double text-anon-accent text-[10px]"></i>`:""}</div>
+                        </div>
+                        ${reactionHtml?`<div class="flex flex-wrap gap-1 mt-1 ml-2">${reactionHtml}</div>`:""}
+                    </div>
+                </div>`
+        }).join("")
+    }
+   
+    async function openConversation(key){
+        if(!key)return
+        let conversation=conversations.find(c=>c.conversation_key===key)||{conversation_key:key,sender_name:key,jid:key}
+        activeThread={conversation_key:key}
+    
+        if(innerWidth<768){
+            el("sidebar").classList.add("hidden")
+            el("mainChatArea").classList.remove("hidden")
+            el("mainChatArea").classList.add("flex")
+        }
+    
+        renderConversationsList()
+        el("emptyChatState").classList.add("hidden")
+        el("activeChatView").classList.remove("hidden")
+        el("activeChatView").classList.add("flex")
+        el("chatTitle").innerText=getConversationTitle(conversation)
+        el("chatSubtitle").innerText=conversation.jid||"Online"
+        el("chatSessionBadge").innerText=`Session: ${conversation.session_phone||"Primary Bot"}`
+    
 
-    toast.classList.remove("translate-y-20", "opacity-0");
-
-    setTimeout(() => {
-        toast.classList.add("translate-y-20", "opacity-0");
-    }, 3500);
-}
-
-window.onload = function() {
-    checkAuth();
-};
-</script>
+        const container=el("chatMessagesContainer")
+        container.innerHTML=`<div class="h-full flex flex-col items-center justify-center text-anon-muted space-y-2"><i class="fa-solid fa-circle-notch fa-spin text-2xl text-anon-accent"></i><span class="text-xs">Loading message logs...</span></div>`
+    
+        try{
+            const r=await fetch(`/api/conversations/${encodeURIComponent(key)}`)
+            if(!r.ok)throw Error()
+            const d=await r.json()
+            renderChatThread(d.messages||[])
+        }catch{
+            container.innerHTML=`<div class="h-full flex items-center justify-center"><div class="bg-anon-panel px-4 py-3 rounded-2xl text-xs text-rose-400 border border-rose-500/20">Unable to load conversation thread history.</div></div>`
+        }
+    }
+    
+    function closeMobileChat(){
+        activeThread=null
+        el("sidebar").classList.remove("hidden")
+        el("mainChatArea").classList.add("hidden")
+        el("mainChatArea").classList.remove("flex")
+        renderConversationsList()
+    }
+    
+    function renderChatThread(messages){
+        const container=el("chatMessagesContainer")
+    
+        if(!messages?.length){
+            container.innerHTML=`<div class="mt-12 mx-auto bg-anon-panel/80 px-6 py-3 rounded-full text-center text-anon-muted text-xs border border-anon-border">No messages recorded for this conversation.</div>`
+            return
+        }
+    
+        const sorted=[...messages].sort((a,b)=>Number(a.created_at)-Number(b.created_at))
+        const statuses=sorted.filter(m=>m.jid==="status@broadcast")
+        const normal=sorted.filter(m=>m.jid!=="status@broadcast")
+    
+        if(!statuses.length){
+            container.innerHTML=renderNormalMessages(normal)
+            setTimeout(()=>container.scrollTop=container.scrollHeight,50)
+            return
+        }
+    
+        const days=new Map()
+    
+        statuses.forEach(s=>{
+            const d=new Date(Number(s.created_at)*1000)
+            const key=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`
+    
+            if(!days.has(key))days.set(key,[])
+            days.get(key).push(s)
+        })
+    
+        const html=[...days.entries()]
+            .sort((a,b)=>b[0].localeCompare(a[0]))
+            .map(([day,list])=>{
+    
+                const groups=new Map()
+    
+                list.forEach(s=>{
+                    const userId=
+                        s.sender||
+                        s.sender_jid||
+                        s.sender_name||
+                        s.push_name||
+                        "unknown"
+    
+                    if(!groups.has(userId))
+                        groups.set(userId,[])
+    
+                    groups.get(userId).push(s)
+                })
+    
+                const people=[...groups.entries()]
+                    .map(([userId,userStatuses])=>{
+                        userStatuses.sort(
+                            (a,b)=>
+                                Number(b.created_at)-
+                                Number(a.created_at)
+                        )
+    
+                        return [userId,userStatuses]
+                    })
+                    .sort((a,b)=>
+                        Number(b[1][0]?.created_at||0)-
+                        Number(a[1][0]?.created_at||0)
+                    )
+    
+                const d=new Date(Number(list[0].created_at)*1000)
+    
+                const label=d.toLocaleDateString([],{
+                    weekday:"long",
+                    year:"numeric",
+                    month:"long",
+                    day:"numeric"
+                })
+    
+                const total=list.length
+    
+                return `<div class="w-full p-3 mb-3 rounded-2xl bg-anon-panel/80 border border-anon-border">
+    
+                    <div class="flex items-center justify-between mb-3">
+                        <div>
+                            <div class="text-xs font-bold text-slate-200">
+                                WhatsApp Statuses
+                            </div>
+    
+                            <div class="text-[10px] text-anon-muted">
+                                ${escapeHtml(label)}
+                            </div>
+                        </div>
+    
+                        <span class="text-[10px] text-anon-accent">
+                            ${total} status${total===1?"":"es"}
+                        </span>
+                    </div>
+    
+                    <div class="space-y-2">
+    
+                        ${people.map(([userId,userStatuses])=>{
+    
+                            const name=
+                                userStatuses[0].sender_name||
+                                userStatuses[0].push_name||
+                                userStatuses[0].sender||
+                                userId
+    
+                            const payload=JSON.stringify(userStatuses)
+                                .replace(/\\/g,"\\\\")
+                                .replace(/'/g,"&#39;")
+    
+                            const latestTime=userStatuses[0].created_at
+                                ?new Date(
+                                    Number(userStatuses[0].created_at)*1000
+                                ).toLocaleTimeString([],{
+                                    hour:"2-digit",
+                                    minute:"2-digit"
+                                })
+                                :""
+    
+                            return `<div
+                                onclick='openStatusUserModal(${payload})'
+                                class="flex items-center gap-3 p-3 rounded-xl bg-black/20 hover:bg-black/30 border border-slate-700/30 cursor-pointer transition"
+                            >
+    
+                                <div class="w-9 h-9 rounded-full bg-anon-accent/10 border border-anon-accent/20 flex items-center justify-center shrink-0">
+                                    <i class="fa-solid fa-user text-anon-accent text-xs"></i>
+                                </div>
+    
+                                <div class="min-w-0 flex-1">
+                                    <div class="text-xs font-bold text-slate-100 truncate">
+                                        ${escapeHtml(name)}
+                                    </div>
+    
+                                    <div class="text-[9px] text-anon-muted truncate">
+                                        ${escapeHtml(userId)}
+                                    </div>
+                                </div>
+    
+                                <div class="text-right shrink-0">
+                                    <div class="text-[10px] text-anon-accent">
+                                        ${userStatuses.length}
+                                        status${userStatuses.length===1?"":"es"}
+                                    </div>
+    
+                                    <div class="text-[9px] text-anon-muted">
+                                        ${latestTime}
+                                    </div>
+                                </div>
+    
+                                <i class="fa-solid fa-chevron-right text-[10px] text-anon-muted"></i>
+    
+                            </div>`
+                        }).join("")}
+    
+                    </div>
+                </div>`
+            }).join("")
+    
+        container.innerHTML=
+            html+
+            (
+                normal.length
+                ?`<div class="h-px bg-anon-border my-3"></div>${renderNormalMessages(normal)}`
+                :""
+            )
+    
+        setTimeout(
+            ()=>container.scrollTop=container.scrollHeight,
+            50
+        )
+    }
+   
+    function openStatusUserModal(statuses){
+        const modal=el("statusDayModal"),content=el("statusDayModalContent"),dateLabel=el("statusDayModalDate")
+        if(!modal||!content||!statuses?.length)return
+    
+        const sorted = [...statuses].sort(
+            (a,b) =>
+                Number(b.created_at) -
+                Number(a.created_at)
+        )
+      const first=new Date(Number(sorted[0].created_at)*1000)
+        dateLabel.textContent=(sorted[0].sender_name||sorted[0].push_name||sorted[0].sender||"Contact")+" • "+first.toLocaleDateString([],{weekday:"long",year:"numeric",month:"long",day:"numeric"})
+    
+        content.innerHTML=sorted.map(m=>{
+            const time=new Date(Number(m.created_at)*1000).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})
+            let body=""
+    
+            if(m.media_path){
+                if(m.media_type==="image"||m.mime_type?.startsWith("image/"))
+                    body=`<img src="${escapeHtml(m.media_path)}" class="w-full max-h-80 object-contain rounded-xl bg-black/30 cursor-pointer" onclick="openMediaModal('${escapeHtml(m.media_path)}','image')">`
+                else if(m.media_type==="video"||m.mime_type?.startsWith("video/"))
+                    body=`<div class="relative cursor-pointer rounded-xl overflow-hidden" onclick="openMediaModal('${escapeHtml(m.media_path)}','video','${escapeHtml(m.mime_type||"video/mp4")}')"><video class="w-full max-h-80 object-contain bg-black/40"><source src="${escapeHtml(m.media_path)}" type="${escapeHtml(m.mime_type||"video/mp4")}"></video><div class="absolute inset-0 flex items-center justify-center"><div class="w-12 h-12 rounded-full bg-black/60 flex items-center justify-center"><i class="fa-solid fa-play text-white"></i></div></div></div>`
+            }
+    
+            return `<div class="p-3 rounded-xl bg-black/20 border border-anon-border">
+                <div class="text-[9px] text-anon-muted mb-2">${time}</div>
+                ${body}
+                ${m.text?`<div class="mt-2 text-xs text-slate-200 break-words">${escapeHtml(m.text)}</div>`:""}
+            </div>`
+        }).join("")
+    
+        modal.classList.remove("hidden")
+        modal.classList.add("flex")
+    }
+    
+    function closeStatusDayModal(){
+        const m=el("statusDayModal")
+        if(m){m.classList.add("hidden");m.classList.remove("flex")}
+    }
+    
+    el("statusDayModal")?.addEventListener("click",e=>{
+        if(e.target.id==="statusDayModal")closeStatusDayModal()
+    })
+    
+    function openMediaModal(src,type,mimeType="video/mp4"){
+        let modal=el("global-media-modal")
+        if(!modal){
+            modal=document.createElement("div")
+            modal.id="global-media-modal"
+            modal.className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 hidden"
+            modal.onclick=e=>{if(e.target===modal||e.target.id==="modal-close-btn")closeMediaModal()}
+            modal.innerHTML=`<div class="relative max-w-4xl w-full max-h-[90vh] flex flex-col items-center justify-center"><button id="modal-close-btn" class="absolute -top-10 right-0 text-white text-2xl p-2"><i class="fa-solid fa-xmark pointer-events-none"></i></button><div id="modal-media-container" class="w-full flex justify-center items-center overflow-hidden rounded-xl"></div></div>`
+            document.body.appendChild(modal)
+        }
+    
+        const c=el("modal-media-container")
+        c.innerHTML=type==="image"?`<img src="${src}" class="max-w-full max-h-[80vh] object-contain rounded-xl shadow-2xl">`:`<video controls autoplay class="max-w-full max-h-[80vh] rounded-xl shadow-2xl"><source src="${src}" type="${mimeType}"></video>`
+        modal.classList.remove("hidden")
+    }
+    
+    function closeMediaModal(){
+        const m=el("global-media-modal")
+        if(m){
+            m.classList.add("hidden")
+            const c=el("modal-media-container")
+            if(c)c.innerHTML=""
+        }
+    }
+    
+    async function fetchHealth(){
+        try{
+            const r=await fetch("/api/health")
+            if(!r.ok)throw Error()
+            const d=await r.json()
+            el("stat-status").innerText=d.status==="ok"?"Operational":"Degraded"
+            el("stat-status").className=d.status==="ok"?"text-sm font-semibold text-anon-accent mt-2":"text-sm font-semibold text-amber-500 mt-2"
+            el("stat-uptime").innerText=formatUptime(d.uptime)
+            renderAdminSessions(d.sessions||[])
+        }catch{
+            el("stat-status").innerText="Offline"
+            el("stat-uptime").innerText="--"
+            renderAdminSessions([])
+        }
+    }
+    
+    function formatUptime(s){
+        s=Number(s||0)
+        const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60)
+        if(d)return`${d}d ${h}h`
+        if(h)return`${h}h ${m}m`
+        return`${m}m`
+    }
+    
+    function renderAdminSessions(sessions){
+        const list=el("adminSessionsList")
+        el("stat-sessions").innerText=sessions.length
+        if(!sessions.length){
+            list.innerHTML=`<div class="text-center py-6 border border-anon-border border-dashed rounded-2xl bg-anon-panel/40 text-anon-muted text-xs">No active WhatsApp accounts linked.</div>`
+            return
+        }
+    
+        list.innerHTML=sessions.map(s=>{
+            const online=s.status==="connected"
+            return `<div class="flex items-center justify-between p-3.5 bg-anon-panel border border-anon-border rounded-2xl">
+                <div class="flex items-center gap-3"><div class="w-9 h-9 bg-anon-sidebar rounded-full flex items-center justify-center border border-anon-border text-anon-accent"><i class="fa-brands fa-whatsapp text-lg"></i></div>
+                <div><p class="font-bold text-xs text-anon-text">${escapeHtml(s.phone||s.id||"Main Session")}</p><p class="text-[10px] text-anon-accent font-medium capitalize">${escapeHtml(s.status||"disconnected")}</p></div></div>
+                <button onclick="promptLogout('${escapeAttr(s.id||"")}')" class="px-3 py-1.5 bg-rose-500/10 text-rose-400 border border-rose-500/20 rounded-xl text-xs font-semibold">Logout</button>
+            </div>`
+        }).join("")
+    }
+    
+    function openModal(id){
+        el(id).classList.remove("hidden")
+        el(id).classList.add("flex")
+        if(id==="statsModal")fetchHealth()
+    }
+    
+    function closeModal(id){
+        el(id).classList.add("hidden")
+        el(id).classList.remove("flex")
+    }
+    
+    function promptLogout(id){
+        el("modalTitle").innerText="Terminate Session"
+        el("modalMessage").innerText=`Are you sure you want to log out session ${id}?`
+        el("modalConfirmBtn").onclick=async()=>{closeModal("modalOverlay");await executeLogout(id)}
+        openModal("modalOverlay")
+    }
+    
+    async function executeLogout(id){
+        try{
+            const r=await fetch(`/api/logout/${encodeURIComponent(id)}`,{method:"POST"})
+            const d=await r.json()
+            if(!r.ok)throw Error(d.error||"Logout failed")
+            showToast("Session terminated successfully","success")
+            fetchHealth()
+        }catch(e){showToast(e.message,"error")}
+    }
+    
+    async function handleAdminPair(e){
+        e.preventDefault()
+        const phone=el("phone").value.trim(),btn=el("pairBtn")
+        el("pairResult").classList.add("hidden")
+        el("pairError").classList.add("hidden")
+        btn.disabled=true
+        btn.innerHTML=`<i class="fa-solid fa-circle-notch fa-spin"></i> Generating Code...`
+        try{
+            const r=await fetch("/api/pair",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({phone})})
+            const d=await r.json()
+            if(!r.ok)throw Error(d.error||"Pairing failed.")
+            el("pairCode").innerText=d.code||""
+            el("pairResult").classList.remove("hidden")
+            showToast("Pairing code generated","success")
+        }catch(e){
+            el("pairErrorMsg").innerText=e.message
+            el("pairError").classList.remove("hidden")
+        }finally{
+            btn.disabled=false
+            btn.innerHTML=`<i class="fa-solid fa-link"></i> Request Pairing Code`
+        }
+    }
+    
+    function copyPairCode(){
+        const code=el("pairCode").innerText
+        if(!code)return
+        const t=document.createElement("textarea")
+        t.value=code
+        document.body.appendChild(t)
+        t.select()
+        try{document.execCommand("copy");showToast("Pairing code copied to clipboard","success")}catch{showToast("Failed to copy code","error")}
+        t.remove()
+    }
+    
+    function showToast(message,type="success"){
+        const toast=el("toast")
+        el("toastMsg").innerText=message
+        el("toastIcon").className=type==="success"?"fa-solid fa-circle-check text-anon-accent text-base":"fa-solid fa-circle-xmark text-rose-500 text-base"
+        toast.classList.remove("translate-y-20","opacity-0")
+        setTimeout(()=>toast.classList.add("translate-y-20","opacity-0"),3500)
+    }
+    
+    window.onload=()=>checkAuth()
+    </script>
 </body>
 </html>

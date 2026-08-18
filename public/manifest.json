@@ -1,0 +1,22 @@
+{
+    "name": "WhatsApp Bot Admin Console",
+    "short_name": "Bot Admin",
+    "description": "WhatsApp Bot management and monitoring console",
+    "start_url": "/admin",
+    "display": "standalone",
+    "background_color": "#000000",
+    "theme_color": "#000546",
+    "orientation": "any",
+    "icons": [
+        {
+            "src": "/logo/logo.jpeg",
+            "sizes": "192x192",
+            "type": "image/jpeg"
+        },
+        {
+            "src": "/logo/logo.jpeg",
+            "sizes": "512x512",
+            "type": "image/jpeg"
+        }
+    ]
+}
